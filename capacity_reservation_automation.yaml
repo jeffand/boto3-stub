@@ -1,0 +1,200 @@
+description: 'Create EC2 capacity reservation with configurable retry logic'
+schemaVersion: '0.3'
+parameters:
+  InstanceType:
+    type: String
+    description: EC2 instance type to reserve
+    default: t2.micro
+  InstanceCount:
+    type: Integer
+    description: Number of instances to reserve
+    default: 1
+  AvailabilityZone:
+    type: String
+    description: AWS Availability Zone for the reservation
+    default: us-west-2a
+  RetryConfig:
+    type: String
+    description: Retry configuration to use (QUICK_RETRY, SLOW_RETRY, EXTENSIVE_RETRY)
+    default: QUICK_RETRY
+    allowedValues:
+      - QUICK_RETRY
+      - SLOW_RETRY
+      - EXTENSIVE_RETRY
+  SimulationMode:
+    type: Boolean
+    description: Run in simulation mode (true) or real mode (false)
+    default: true
+
+mainSteps:
+  - name: createCapacityReservation
+    action: 'aws:executeScript'
+    inputs:
+      Runtime: python3.9
+      Handler: create_reservation
+      Script: |-
+        import json
+        import boto3
+        import time
+        import logging
+        from botocore.exceptions import ClientError
+        from botocore.stub import Stubber
+
+        # Configure logging
+        logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+        logger = logging.getLogger(__name__)
+
+        # Retry configurations
+        RETRY_CONFIG = {
+            'QUICK_RETRY': {
+                'max_retries': 3,
+                'retry_delay_seconds': 1,
+                'description': 'Quick retries with short delays'
+            },
+            'SLOW_RETRY': {
+                'max_retries': 2,
+                'retry_delay_seconds': 2,
+                'description': 'Fewer retries with longer delays'
+            },
+            'EXTENSIVE_RETRY': {
+                'max_retries': 20,
+                'retry_delay_seconds': 3,
+                'description': 'Many retries with longer delays'
+            }
+        }
+
+        class CapacityReservationManager:
+            def __init__(self, region_name='us-west-2', retry_config='QUICK_RETRY', simulation_mode=True):
+                self.ec2_client = boto3.client('ec2', region_name=region_name)
+                self.config = RETRY_CONFIG[retry_config]
+                self.max_retries = self.config['max_retries']
+                self.retry_delay = self.config['retry_delay_seconds']
+                self.simulation_mode = simulation_mode
+                
+                if simulation_mode:
+                    self.stubber = Stubber(self.ec2_client)
+                    logger.info("Running in simulation mode")
+                else:
+                    logger.info("Running in real mode")
+                
+                logger.info(f"Initialized with {self.config['description']}")
+
+            def setup_simulation(self):
+                """Setup simulation responses if in simulation mode"""
+                if self.simulation_mode:
+                    for _ in range(self.max_retries):
+                        self.stubber.add_client_error(
+                            'create_capacity_reservation',
+                            service_error_code='InsufficientCapacity',
+                            service_message='Simulated InsufficientCapacity error',
+                            expected_params={
+                                'InstanceType': 't2.micro',
+                                'InstancePlatform': 'Linux/UNIX',
+                                'AvailabilityZone': 'us-west-2a',
+                                'InstanceCount': 1,
+                                'EndDateType': 'unlimited'
+                            }
+                        )
+
+            def create_capacity_reservation(self, instance_type, instance_count, 
+                                         availability_zone, platform='Linux/UNIX'):
+                attempt = 0
+                
+                if self.simulation_mode:
+                    self.setup_simulation()
+                    self.stubber.activate()
+                
+                while attempt < self.max_retries:
+                    try:
+                        logger.info(f"\nAttempt {attempt + 1} of {self.max_retries}")
+                        response = self.ec2_client.create_capacity_reservation(
+                            InstanceType=instance_type,
+                            InstancePlatform=platform,
+                            AvailabilityZone=availability_zone,
+                            InstanceCount=instance_count,
+                            EndDateType='unlimited'
+                        )
+                        
+                        reservation_id = response['CapacityReservation']['CapacityReservationId']
+                        logger.info(f"Successfully created capacity reservation: {reservation_id}")
+                        return {
+                            'success': True,
+                            'reservation': response['CapacityReservation']
+                        }
+                        
+                    except ClientError as e:
+                        error_code = e.response['Error']['Code']
+                        error_message = e.response['Error']['Message']
+                        
+                        if error_code == 'InsufficientCapacity':
+                            logger.warning(f"Insufficient capacity error: {error_message}")
+                            
+                            if attempt < self.max_retries - 1:
+                                logger.info(f"Waiting {self.retry_delay} seconds before retrying...")
+                                time.sleep(self.retry_delay)
+                            
+                            attempt += 1
+                        else:
+                            logger.error(f"AWS Error: {error_code} - {error_message}")
+                            return {
+                                'success': False,
+                                'error': f"AWS Error: {error_code} - {error_message}"
+                            }
+                
+                return {
+                    'success': False,
+                    'error': "Max retries exceeded. Failed to create capacity reservation."
+                }
+
+        def create_reservation(events, context):
+            """
+            SSM Automation entry point
+            """
+            try:
+                # Extract parameters from the automation input
+                instance_type = events['InstanceType']
+                instance_count = events['InstanceCount']
+                availability_zone = events['AvailabilityZone']
+                retry_config = events['RetryConfig']
+                simulation_mode = events['SimulationMode']
+                
+                # Create manager and attempt reservation
+                manager = CapacityReservationManager(
+                    retry_config=retry_config,
+                    simulation_mode=simulation_mode
+                )
+                
+                result = manager.create_capacity_reservation(
+                    instance_type=instance_type,
+                    instance_count=instance_count,
+                    availability_zone=availability_zone
+                )
+                
+                if result['success']:
+                    return {
+                        'statusCode': 200,
+                        'reservation': result['reservation']
+                    }
+                else:
+                    return {
+                        'statusCode': 400,
+                        'error': result['error']
+                    }
+                    
+            except Exception as e:
+                logger.error(f"Unexpected error: {str(e)}")
+                return {
+                    'statusCode': 500,
+                    'error': str(e)
+                }
+
+    outputs:
+      - Name: ReservationId
+        Selector: $.Payload.reservation.CapacityReservationId
+        Type: String
+      - Name: StatusCode
+        Selector: $.Payload.statusCode
+        Type: Integer
+      - Name: Error
+        Selector: $.Payload.error
+        Type: String
