@@ -364,6 +364,13 @@ def setup_aws_session(profile_name=None):
     """Setup AWS session with optional profile"""
     import boto3
     try:
+        # ############################################################
+        # WARNING: This will create a real AWS session
+        # This will:
+        # 1. Load real AWS credentials
+        # 2. Test access to your AWS account
+        # 3. Enable real AWS API calls
+        # ############################################################
         session = boto3.Session(profile_name=profile_name)
         # Test the credentials
         sts = session.client('sts')
@@ -411,6 +418,14 @@ class CapacityReservationManager:
         self.max_wait_time = getattr(self.args, 'max_wait_time', 3600)
 
         if not self.args.simulation_mode:
+            # ############################################################
+            # WARNING: Non-simulation mode - Will use real AWS credentials
+            # This will:
+            # 1. Access your AWS account
+            # 2. Use your configured AWS profile
+            # 3. Enable real AWS API calls
+            # ############################################################
+            
             # Get available profiles
             profiles = get_aws_profiles()
             
@@ -445,7 +460,7 @@ class CapacityReservationManager:
             account_id = sts.get_caller_identity()['Account']
             logger.info(f"AWS Account ID: {account_id}")
         else:
-            # In simulation mode, use stubber
+            # Simulation mode - No real AWS calls will be made
             self.ec2_client = boto3.client('ec2', region_name=self.args.region)
             self.stubber = Stubber(self.ec2_client)
             logger.info("Running in simulation mode")
@@ -568,7 +583,15 @@ class CapacityReservationManager:
                 if self.args.end_date_type == 'limited' and self.args.end_date:
                     params['EndDate'] = self.args.end_date
 
+                # ############################################################
+                # WARNING: This will make a real AWS API call if not in simulation mode
+                # This will:
+                # 1. Create an actual capacity reservation in your AWS account
+                # 2. Incur charges for the reserved capacity
+                # 3. Count against your service quotas
+                # ############################################################
                 response = self.ec2_client.create_capacity_reservation(**params)
+                
                 reservation = response['CapacityReservation']
                 
                 logger.info(f"Successfully created capacity reservation: {reservation['CapacityReservationId']}")
