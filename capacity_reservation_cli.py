@@ -131,87 +131,163 @@ RETRY_CONFIG = {
     }
 }
 
-def get_interactive_choices():
-    """Get choices through interactive prompts"""
-    
+def get_standard_questions(defaults=None):
+    """Get standard questions for interactive mode with optional defaults"""
+    if defaults is None:
+        defaults = {}
+        
     questions = [
         # Instance Type Selection (two-step process)
         inquirer.List('instance_type_category',
                      message="Select instance type category",
                      choices=list(INSTANCE_TYPE_CHOICES.keys()),
-                     default='general_purpose'),
+                     default=next((cat for cat, types in INSTANCE_TYPE_CHOICES.items() 
+                                 if defaults.get('instance_type') in types), 'general_purpose')),
         
         # Dynamic instance type choices based on category
         inquirer.List('instance_type',
                      message="Choose instance type",
-                     # Lambda function is used to return dynamic list of instance type choices
-                     # - it takes the answers dictionary as a parameter
-                     # - it returns the list of instance type choices for the selected category
-                     choices=lambda answers: INSTANCE_TYPE_CHOICES[answers['instance_type_category']]),
+                     choices=lambda answers: INSTANCE_TYPE_CHOICES[answers['instance_type_category']],
+                     default=defaults.get('instance_type')),
         
         # Instance Count
         inquirer.Text('instance_count',
                      message="Enter number of instances to reserve",
-                     # Lambda function used as inline validator for inquirer
-                     # - Takes two params: _ (unused answers dict) and x (current input)
-                     # - Returns True if input is valid (digits only AND positive number)
-                     # - Used here because validation is simple and specific to this field
-                     # - Alternative would be a separate named function if more complex validation needed
-                     validate=lambda _, x: x.isdigit() and int(x) > 0),
+                     validate=lambda _, x: x.isdigit() and int(x) > 0,
+                     default=str(defaults.get('instance_count', '1'))),
         
         # Platform Selection
         inquirer.List('platform',
                      message="Select platform",
                      choices=PLATFORM_CHOICES,
-                     default='Linux/UNIX'),
+                     default=defaults.get('platform', 'Linux/UNIX')),
 
         # Region and AZ Selection
         inquirer.List('region',
                      message="Select region",
                      choices=REGION_CHOICES,
-                     default='us-west-2'),
+                     default=defaults.get('region', 'us-west-2')),
         
         inquirer.Text('availability_zone',
                      message="Enter availability zone (leave empty for auto-select)",
-                     default=''),
+                     default=defaults.get('availability_zone', '')),
 
         # Instance Settings
         inquirer.Confirm('ebs_optimized',
                         message="Enable EBS optimization?",
-                        default=False),
+                        default=defaults.get('ebs_optimized', False)),
         
         inquirer.List('tenancy',
                      message="Select tenancy",
                      choices=['default', 'dedicated'],
-                     default='default'),
+                     default=defaults.get('tenancy', 'default')),
 
         # Reservation Settings
         inquirer.List('end_date_type',
                      message="Select end date type",
                      choices=['unlimited', 'limited'],
-                     default='unlimited'),
+                     default=defaults.get('end_date_type', 'unlimited')),
 
         # End date (only if limited)
         inquirer.Text('end_date',
                      message="Enter end date (ISO 8601 format, e.g., 2024-12-31T23:59:59)",
                      ignore=lambda answers: answers['end_date_type'] == 'unlimited',
-                     validate=lambda _, x: len(x) > 0),
+                     validate=validate_date,
+                     default=defaults.get('end_date', '')),
 
         # Tags
         inquirer.Confirm('add_tags',
                         message="Would you like to add tags?",
+                        default=bool(defaults.get('tags', False)))
+    ]
+    
+    return questions
+
+def validate_date(_, value):
+    """Validate date string format"""
+    if not value:
+        return False
+    try:
+        datetime.fromisoformat(value.replace('Z', '+00:00'))
+        return True
+    except ValueError:
+        return False
+
+def get_interactive_choices():
+    """Get choices through interactive prompts"""
+    
+    # First ask if user wants to base on existing instance
+    base_questions = [
+        inquirer.Confirm('use_existing',
+                        message="Would you like to base this reservation on an existing instance?",
                         default=False)
     ]
-
-    answers = inquirer.prompt(questions)
-    if not answers:
+    
+    base_answers = inquirer.prompt(base_questions)
+    if not base_answers:
         sys.exit(1)
+        
+    if base_answers['use_existing']:
+        instance_questions = [
+            inquirer.Text('instance_id',
+                         message="Enter the instance ID",
+                         validate=lambda _, x: x.startswith('i-') and len(x) == 19)
+        ]
+        
+        instance_answers = inquirer.prompt(instance_questions)
+        if not instance_answers:
+            sys.exit(1)
+            
+        # Create temporary manager to get instance metadata
+        temp_manager = CapacityReservationManager({'simulation_mode': False})
+        metadata = temp_manager.get_instance_metadata(instance_answers['instance_id'])
+        
+        if not metadata:
+            logger.error("Failed to get instance metadata")
+            sys.exit(1)
+            
+        # Ask if user wants to modify any of the metadata values
+        modify_questions = [
+            inquirer.Confirm('modify_values',
+                           message="Would you like to modify any of these values?",
+                           default=False)
+        ]
+        
+        if inquirer.prompt(modify_questions)['modify_values']:
+            # Use regular questions but with metadata as defaults
+            questions = get_standard_questions(metadata)
+        else:
+            # Just ask for count and end date type
+            questions = [
+                inquirer.Text('instance_count',
+                            message="Number of instances",
+                            validate=lambda _, x: x.isdigit() and int(x) > 0),
+                            
+                inquirer.List('end_date_type',
+                            message="Select end date type",
+                            choices=['unlimited', 'limited'],
+                            default='unlimited'),
+                            
+                inquirer.Text('end_date',
+                            message="Enter end date (ISO 8601 format, e.g., 2024-12-31T23:59:59)",
+                            ignore=lambda answers: answers['end_date_type'] == 'unlimited',
+                            validate=validate_date)
+            ]
+            
+            answers = inquirer.prompt(questions)
+            if not answers:
+                sys.exit(1)
+                
+            # Combine metadata with new answers
+            answers.update(metadata)
+    else:
+        # Use standard questions
+        questions = get_standard_questions()
+        answers = inquirer.prompt(questions)
+        if not answers:
+            sys.exit(1)
 
-    # Handle availability zone default if empty
-    if not answers['availability_zone']:
-        answers['availability_zone'] = f"{answers['region']}a"
-
-    # Handle tags if user wants to add them
+    # Handle tags
     if answers.pop('add_tags', False):
         tags = {}
         while True:
@@ -234,6 +310,25 @@ def get_interactive_choices():
         answers['tags'] = tags
     else:
         answers['tags'] = {}
+
+    # Handle availability zone default if empty
+    if not answers.get('availability_zone'):
+        answers['availability_zone'] = f"{answers['region']}a"
+
+    # Add default values for missing fields
+    defaults = {
+        'simulation_mode': True,
+        'log_level': 'INFO',
+        'retry_config': 'QUICK_RETRY',
+        'max_retries': 3,
+        'retry_delay': 1,
+        'max_wait_time': 3600,
+        'cleanup_on_failure': False
+    }
+    
+    for key, value in defaults.items():
+        if key not in answers:
+            answers[key] = value
 
     # Display summary of choices
     logger.info("\nCapacity Reservation Parameters Summary:")
@@ -261,124 +356,6 @@ def get_interactive_choices():
         sys.exit(0)
 
     return answers
-
-def parse_args():
-    parser = argparse.ArgumentParser(
-        description='AWS EC2 Capacity Reservation CLI with simulation capabilities'
-    )
-    
-    parser.add_argument('--non-interactive',
-                       action='store_true',
-                       help='Run in non-interactive mode with command line arguments')
-    
-    # Only parse other arguments if --non-interactive is specified
-    args, remaining = parser.parse_known_args()
-    
-    if args.non_interactive:
-        # Instance Configuration
-        instance_group = parser.add_argument_group('Instance Configuration')
-        instance_group.add_argument('--instance-type', 
-                                  default='t2.micro',
-                                  choices=[inst for types in INSTANCE_TYPE_CHOICES.values() for inst in types],
-                                  help='EC2 instance type')
-        instance_group.add_argument('--instance-count', 
-                                  type=int,
-                                  default=1,
-                                  help='Number of instances to reserve')
-        instance_group.add_argument('--platform',
-                                  default='Linux/UNIX',
-                                  choices=PLATFORM_CHOICES,
-                                  help='Operating system platform')
-        
-        # Location Configuration
-        location_group = parser.add_argument_group('Location Configuration')
-        location_group.add_argument('--region',
-                                  default='us-west-2',
-                                  choices=REGION_CHOICES,
-                                  help='AWS region')
-        location_group.add_argument('--availability-zone',
-                                  help='Availability zone (default: first AZ in region)')
-        
-        # Reservation Configuration
-        reservation_group = parser.add_argument_group('Reservation Configuration')
-        reservation_group.add_argument('--ebs-optimized',
-                                     action='store_true',
-                                     help='Enable EBS optimization')
-        reservation_group.add_argument('--tenancy',
-                                     choices=['default', 'dedicated'],
-                                     default='default',
-                                     help='Instance tenancy')
-        reservation_group.add_argument('--end-date-type',
-                                     choices=['unlimited', 'limited'],
-                                     default='unlimited',
-                                     help='Reservation end date type')
-        reservation_group.add_argument('--end-date',
-                                     help='End date for limited reservations (ISO 8601 format)')
-        reservation_group.add_argument('--tags',
-                                     type=json.loads,
-                                     default='{}',
-                                     help='Tags in JSON format (e.g., \'{"Key": "Value"}\')')
-        
-        # Retry Configuration
-        retry_group = parser.add_argument_group('Retry Configuration')
-        retry_group.add_argument('--retry-config',
-                               choices=list(RETRY_CONFIG.keys()),
-                               default='QUICK_RETRY',
-                               help='Predefined retry configuration')
-        retry_group.add_argument('--custom-max-retries',
-                               type=int,
-                               default=0,
-                               help='Override max retries (0 to use retry config value)')
-        retry_group.add_argument('--custom-retry-delay',
-                               type=int,
-                               default=0,
-                               help='Override retry delay in seconds (0 to use retry config value)')
-        retry_group.add_argument('--max-wait-time',
-                               type=int,
-                               default=3600,
-                               help='Maximum total wait time in seconds')
-        
-        # Execution Configuration
-        exec_group = parser.add_argument_group('Execution Configuration')
-        exec_group.add_argument('--simulation-mode',
-                              action='store_true',
-                              help='Run in simulation mode')
-        exec_group.add_argument('--log-level',
-                              choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
-                              default='INFO',
-                              help='Logging level')
-        exec_group.add_argument('--cleanup-on-failure',
-                              action='store_true',
-                              help='Clean up failed reservations')
-        
-        return parser.parse_args()
-    else:
-        return get_interactive_choices()
-
-def get_aws_profiles():
-    """Get available AWS profiles from credentials and config files"""
-    import boto3.session
-    return boto3.session.Session().available_profiles
-
-def setup_aws_session(profile_name=None):
-    """Setup AWS session with optional profile"""
-    import boto3
-    try:
-        # ############################################################
-        # WARNING: This will create a real AWS session
-        # This will:
-        # 1. Load real AWS credentials
-        # 2. Test access to your AWS account
-        # 3. Enable real AWS API calls
-        # ############################################################
-        session = boto3.Session(profile_name=profile_name)
-        # Test the credentials
-        sts = session.client('sts')
-        sts.get_caller_identity()
-        return session
-    except Exception as e:
-        logger.error(f"Failed to setup AWS session with profile '{profile_name}': {str(e)}")
-        return None
 
 class CapacityReservationManager:
     def __init__(self, args):
@@ -467,6 +444,70 @@ class CapacityReservationManager:
             self.setup_simulation()
 
         logger.info(f"Initialized with {self.config['description']}")
+
+    def get_instance_metadata(self, instance_id):
+        """Get relevant metadata from an existing instance for capacity reservation"""
+        try:
+            # ############################################################
+            # WARNING: This will make real AWS API calls
+            # This will:
+            # 1. Query your AWS account for instance details
+            # 2. Access instance metadata
+            # ############################################################
+            response = self.ec2_client.describe_instances(InstanceIds=[instance_id])
+            
+            if not response['Reservations'] or not response['Reservations'][0]['Instances']:
+                logger.error(f"Instance {instance_id} not found")
+                return None
+                
+            instance = response['Reservations'][0]['Instances'][0]
+            
+            # Extract relevant metadata for capacity reservation
+            metadata = {
+                'instance_type': instance['InstanceType'],
+                'platform': instance.get('Platform', 'Linux/UNIX'),  # Default to Linux/UNIX if not specified
+                'availability_zone': instance['Placement']['AvailabilityZone'],
+                'tenancy': instance['Placement']['Tenancy'],
+                'ebs_optimized': instance['EbsOptimized'],
+                # Copy relevant tags
+                'tags': {tag['Key']: tag['Value'] for tag in instance.get('Tags', [])
+                        if tag['Key'] in ['Name', 'Environment', 'Project', 'Owner']},
+                # Region from AZ
+                'region': instance['Placement']['AvailabilityZone'][:-1]
+            }
+            
+            # Handle platform-specific details
+            if 'Platform' in instance and instance['Platform'] == 'windows':
+                if 'license' in instance.get('LicenseSpecifications', [{}])[0].get('LicenseConfigurationArn', '').lower():
+                    if 'sql' in instance.get('LicenseSpecifications', [{}])[0].get('LicenseConfigurationArn', '').lower():
+                        if 'enterprise' in instance.get('LicenseSpecifications', [{}])[0].get('LicenseConfigurationArn', '').lower():
+                            metadata['platform'] = 'Windows with SQL Server Enterprise'
+                        elif 'standard' in instance.get('LicenseSpecifications', [{}])[0].get('LicenseConfigurationArn', '').lower():
+                            metadata['platform'] = 'Windows with SQL Server Standard'
+                        else:
+                            metadata['platform'] = 'Windows with SQL Server Web'
+                    else:
+                        metadata['platform'] = 'Windows'
+
+            logger.info("\nInstance Metadata Summary:")
+            logger.info("-" * 40)
+            logger.info(f"Instance ID:        {instance_id}")
+            logger.info(f"Instance Type:      {metadata['instance_type']}")
+            logger.info(f"Platform:           {metadata['platform']}")
+            logger.info(f"Availability Zone:  {metadata['availability_zone']}")
+            logger.info(f"Tenancy:           {metadata['tenancy']}")
+            logger.info(f"EBS Optimized:     {'Yes' if metadata['ebs_optimized'] else 'No'}")
+            if metadata['tags']:
+                logger.info("\nRelevant Tags:")
+                for key, value in metadata['tags'].items():
+                    logger.info(f"  {key}: {value}")
+            logger.info("-" * 40)
+            
+            return metadata
+            
+        except ClientError as e:
+            logger.error(f"Error getting instance metadata: {str(e)}")
+            return None
 
     def setup_simulation(self):
         """Setup simulation responses for create_capacity_reservation"""
@@ -590,6 +631,7 @@ class CapacityReservationManager:
                 # 2. Incur charges for the reserved capacity
                 # 3. Count against your service quotas
                 # ############################################################
+                
                 response = self.ec2_client.create_capacity_reservation(**params)
                 
                 reservation = response['CapacityReservation']
@@ -622,6 +664,115 @@ class CapacityReservationManager:
         if last_error:
             logger.error(f"Failed after {attempt} attempts. Last error: {str(last_error)}")
         return False, None
+
+def parse_args():
+    """Parse command line arguments"""
+    parser = argparse.ArgumentParser(
+        description='AWS EC2 Capacity Reservation CLI with simulation capabilities'
+    )
+    
+    parser.add_argument('--non-interactive',
+                       action='store_true',
+                       help='Run in non-interactive mode with command line arguments')
+    
+    # Only parse other arguments if --non-interactive is specified
+    args, remaining = parser.parse_known_args()
+    
+    if args.non_interactive:
+        # Instance Configuration
+        instance_group = parser.add_argument_group('Instance Configuration')
+        instance_group.add_argument('--instance-type', 
+                                  default='t2.micro',
+                                  choices=[inst for types in INSTANCE_TYPE_CHOICES.values() for inst in types],
+                                  help='EC2 instance type')
+        instance_group.add_argument('--instance-count', 
+                                  type=int,
+                                  default=1,
+                                  help='Number of instances to reserve')
+        instance_group.add_argument('--platform',
+                                  default='Linux/UNIX',
+                                  choices=PLATFORM_CHOICES,
+                                  help='Operating system platform')
+        instance_group.add_argument('--existing-instance',
+                                  help='Base reservation on existing instance ID')
+        
+        # Location Configuration
+        location_group = parser.add_argument_group('Location Configuration')
+        location_group.add_argument('--region',
+                                  default='us-west-2',
+                                  choices=REGION_CHOICES,
+                                  help='AWS region')
+        location_group.add_argument('--availability-zone',
+                                  help='Availability zone (default: first AZ in region)')
+        
+        # Reservation Configuration
+        reservation_group = parser.add_argument_group('Reservation Configuration')
+        reservation_group.add_argument('--ebs-optimized',
+                                     action='store_true',
+                                     help='Enable EBS optimization')
+        reservation_group.add_argument('--tenancy',
+                                     choices=['default', 'dedicated'],
+                                     default='default',
+                                     help='Instance tenancy')
+        reservation_group.add_argument('--end-date-type',
+                                     choices=['unlimited', 'limited'],
+                                     default='unlimited',
+                                     help='Reservation end date type')
+        reservation_group.add_argument('--end-date',
+                                     help='End date for limited reservations (ISO 8601 format)')
+        reservation_group.add_argument('--tags',
+                                     type=json.loads,
+                                     default='{}',
+                                     help='Tags in JSON format (e.g., \'{"Key": "Value"}\')')
+        
+        # Retry Configuration
+        retry_group = parser.add_argument_group('Retry Configuration')
+        retry_group.add_argument('--retry-config',
+                               choices=list(RETRY_CONFIG.keys()),
+                               default='QUICK_RETRY',
+                               help='Predefined retry configuration')
+        retry_group.add_argument('--custom-max-retries',
+                               type=int,
+                               default=0,
+                               help='Override max retries (0 to use retry config value)')
+        retry_group.add_argument('--custom-retry-delay',
+                               type=int,
+                               default=0,
+                               help='Override retry delay in seconds (0 to use retry config value)')
+        retry_group.add_argument('--max-wait-time',
+                               type=int,
+                               default=3600,
+                               help='Maximum total wait time in seconds')
+        
+        # Execution Configuration
+        exec_group = parser.add_argument_group('Execution Configuration')
+        exec_group.add_argument('--simulation-mode',
+                              action='store_true',
+                              default=True,
+                              help='Run in simulation mode')
+        exec_group.add_argument('--log-level',
+                              choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
+                              default='INFO',
+                              help='Logging level')
+        exec_group.add_argument('--cleanup-on-failure',
+                              action='store_true',
+                              help='Clean up failed reservations')
+        
+        args = parser.parse_args()
+        
+        # If using existing instance, fetch its metadata
+        if args.existing_instance:
+            temp_manager = CapacityReservationManager({'simulation_mode': False})
+            metadata = temp_manager.get_instance_metadata(args.existing_instance)
+            if metadata:
+                # Update args with instance metadata if not explicitly specified
+                for key, value in metadata.items():
+                    if not getattr(args, key.replace('-', '_'), None):
+                        setattr(args, key.replace('-', '_'), value)
+        
+        return vars(args)  # Convert namespace to dictionary
+    else:
+        return get_interactive_choices()
 
 def main():
     args = parse_args()
