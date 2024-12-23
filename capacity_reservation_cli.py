@@ -10,6 +10,7 @@ from botocore.stub import Stubber
 from botocore.exceptions import ClientError
 from datetime import datetime
 import pytz
+import sys
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -17,11 +18,80 @@ logger = logging.getLogger(__name__)
 
 # Common instance types by use case
 INSTANCE_TYPE_CHOICES = {
-    'general_purpose': ['t2.micro', 't3.micro', 't3.small', 'm5.large'],
-    'compute_optimized': ['c5.large', 'c5.xlarge', 'c5.2xlarge'],
-    'memory_optimized': ['r5.large', 'r5.xlarge', 'r5.2xlarge'],
-    'storage_optimized': ['i3.large', 'i3.xlarge'],
-    'gpu': ['g4dn.xlarge', 'p3.2xlarge']
+    'general_purpose': [
+        # T instances (burstable)
+        't2.nano', 't2.micro', 't2.small', 't2.medium', 't2.large', 't2.xlarge', 't2.2xlarge',
+        't3.nano', 't3.micro', 't3.small', 't3.medium', 't3.large', 't3.xlarge', 't3.2xlarge',
+        't3a.nano', 't3a.micro', 't3a.small', 't3a.medium', 't3a.large', 't3a.xlarge', 't3a.2xlarge',
+        # M instances (standard)
+        'm4.large', 'm4.xlarge', 'm4.2xlarge', 'm4.4xlarge', 'm4.10xlarge', 'm4.16xlarge',
+        'm5.large', 'm5.xlarge', 'm5.2xlarge', 'm5.4xlarge', 'm5.8xlarge', 'm5.12xlarge', 'm5.16xlarge', 'm5.24xlarge',
+        'm5a.large', 'm5a.xlarge', 'm5a.2xlarge', 'm5a.4xlarge', 'm5a.8xlarge', 'm5a.12xlarge', 'm5a.16xlarge', 'm5a.24xlarge',
+        'm6a.large', 'm6a.xlarge', 'm6a.2xlarge', 'm6a.4xlarge', 'm6a.8xlarge', 'm6a.12xlarge', 'm6a.16xlarge', 'm6a.24xlarge', 'm6a.32xlarge', 'm6a.48xlarge',
+        'm6g.medium', 'm6g.large', 'm6g.xlarge', 'm6g.2xlarge', 'm6g.4xlarge', 'm6g.8xlarge', 'm6g.12xlarge', 'm6g.16xlarge',
+        'm6i.large', 'm6i.xlarge', 'm6i.2xlarge', 'm6i.4xlarge', 'm6i.8xlarge', 'm6i.12xlarge', 'm6i.16xlarge', 'm6i.24xlarge', 'm6i.32xlarge',
+        'm7g.medium', 'm7g.large', 'm7g.xlarge', 'm7g.2xlarge', 'm7g.4xlarge', 'm7g.8xlarge', 'm7g.12xlarge', 'm7g.16xlarge'
+    ],
+    'compute_optimized': [
+        # C instances
+        'c4.large', 'c4.xlarge', 'c4.2xlarge', 'c4.4xlarge', 'c4.8xlarge',
+        'c5.large', 'c5.xlarge', 'c5.2xlarge', 'c5.4xlarge', 'c5.9xlarge', 'c5.12xlarge', 'c5.18xlarge', 'c5.24xlarge',
+        'c5a.large', 'c5a.xlarge', 'c5a.2xlarge', 'c5a.4xlarge', 'c5a.8xlarge', 'c5a.12xlarge', 'c5a.16xlarge', 'c5a.24xlarge',
+        'c6a.large', 'c6a.xlarge', 'c6a.2xlarge', 'c6a.4xlarge', 'c6a.8xlarge', 'c6a.12xlarge', 'c6a.16xlarge', 'c6a.24xlarge', 'c6a.32xlarge', 'c6a.48xlarge',
+        'c6g.medium', 'c6g.large', 'c6g.xlarge', 'c6g.2xlarge', 'c6g.4xlarge', 'c6g.8xlarge', 'c6g.12xlarge', 'c6g.16xlarge',
+        'c6i.large', 'c6i.xlarge', 'c6i.2xlarge', 'c6i.4xlarge', 'c6i.8xlarge', 'c6i.12xlarge', 'c6i.16xlarge', 'c6i.24xlarge', 'c6i.32xlarge',
+        'c7g.medium', 'c7g.large', 'c7g.xlarge', 'c7g.2xlarge', 'c7g.4xlarge', 'c7g.8xlarge', 'c7g.12xlarge', 'c7g.16xlarge'
+    ],
+    'memory_optimized': [
+        # R instances
+        'r4.large', 'r4.xlarge', 'r4.2xlarge', 'r4.4xlarge', 'r4.8xlarge', 'r4.16xlarge',
+        'r5.large', 'r5.xlarge', 'r5.2xlarge', 'r5.4xlarge', 'r5.8xlarge', 'r5.12xlarge', 'r5.16xlarge', 'r5.24xlarge',
+        'r5a.large', 'r5a.xlarge', 'r5a.2xlarge', 'r5a.4xlarge', 'r5a.8xlarge', 'r5a.12xlarge', 'r5a.16xlarge', 'r5a.24xlarge',
+        'r6a.large', 'r6a.xlarge', 'r6a.2xlarge', 'r6a.4xlarge', 'r6a.8xlarge', 'r6a.12xlarge', 'r6a.16xlarge', 'r6a.24xlarge', 'r6a.32xlarge', 'r6a.48xlarge',
+        'r6g.medium', 'r6g.large', 'r6g.xlarge', 'r6g.2xlarge', 'r6g.4xlarge', 'r6g.8xlarge', 'r6g.12xlarge', 'r6g.16xlarge',
+        'r6i.large', 'r6i.xlarge', 'r6i.2xlarge', 'r6i.4xlarge', 'r6i.8xlarge', 'r6i.12xlarge', 'r6i.16xlarge', 'r6i.24xlarge', 'r6i.32xlarge',
+        # X instances (memory intensive)
+        'x1.16xlarge', 'x1.32xlarge',
+        'x1e.xlarge', 'x1e.2xlarge', 'x1e.4xlarge', 'x1e.8xlarge', 'x1e.16xlarge', 'x1e.32xlarge',
+        'x2gd.medium', 'x2gd.large', 'x2gd.xlarge', 'x2gd.2xlarge', 'x2gd.4xlarge', 'x2gd.8xlarge', 'x2gd.12xlarge', 'x2gd.16xlarge',
+        # High Memory instances
+        'u-3tb1.56xlarge', 'u-6tb1.56xlarge', 'u-6tb1.112xlarge', 'u-9tb1.112xlarge', 'u-12tb1.112xlarge'
+    ],
+    'storage_optimized': [
+        # I instances (NVMe SSD)
+        'i3.large', 'i3.xlarge', 'i3.2xlarge', 'i3.4xlarge', 'i3.8xlarge', 'i3.16xlarge', 'i3.metal',
+        'i3en.large', 'i3en.xlarge', 'i3en.2xlarge', 'i3en.3xlarge', 'i3en.6xlarge', 'i3en.12xlarge', 'i3en.24xlarge', 'i3en.metal',
+        # D instances (HDD)
+        'd2.xlarge', 'd2.2xlarge', 'd2.4xlarge', 'd2.8xlarge',
+        'd3.xlarge', 'd3.2xlarge', 'd3.4xlarge', 'd3.8xlarge',
+        'd3en.xlarge', 'd3en.2xlarge', 'd3en.4xlarge', 'd3en.6xlarge', 'd3en.8xlarge', 'd3en.12xlarge'
+    ],
+    'accelerated_computing': [
+        # P instances (GPU)
+        'p2.xlarge', 'p2.8xlarge', 'p2.16xlarge',
+        'p3.2xlarge', 'p3.8xlarge', 'p3.16xlarge',
+        'p3dn.24xlarge',
+        'p4d.24xlarge',
+        'p4de.24xlarge',
+        # G instances (Graphics)
+        'g3.4xlarge', 'g3.8xlarge', 'g3.16xlarge',
+        'g4dn.xlarge', 'g4dn.2xlarge', 'g4dn.4xlarge', 'g4dn.8xlarge', 'g4dn.12xlarge', 'g4dn.16xlarge', 'g4dn.metal',
+        'g5.xlarge', 'g5.2xlarge', 'g5.4xlarge', 'g5.8xlarge', 'g5.12xlarge', 'g5.16xlarge', 'g5.24xlarge', 'g5.48xlarge',
+        # F instances (FPGA)
+        'f1.2xlarge', 'f1.4xlarge', 'f1.16xlarge',
+        # Inf instances (Inferentia)
+        'inf1.xlarge', 'inf1.2xlarge', 'inf1.6xlarge', 'inf1.24xlarge',
+        'inf2.xlarge', 'inf2.8xlarge', 'inf2.24xlarge', 'inf2.48xlarge',
+        # Trn instances (Trainium)
+        'trn1.2xlarge', 'trn1.32xlarge',
+        'trn1n.32xlarge'
+    ],
+    'hpc_optimized': [
+        # Hpc instances
+        'hpc6a.48xlarge',
+        'hpc6id.32xlarge',
+        'hpc7g.4xlarge', 'hpc7g.8xlarge', 'hpc7g.16xlarge'
+    ]
 }
 
 # Platform choices
@@ -62,168 +132,134 @@ RETRY_CONFIG = {
 }
 
 def get_interactive_choices():
-    """Walk through all parameters interactively"""
-    from datetime import datetime, timezone as tz
+    """Get choices through interactive prompts"""
     
     questions = [
         # Instance Type Selection (two-step process)
-        inquirer.List('instance_category',
+        inquirer.List('instance_type_category',
                      message="Select instance type category",
                      choices=list(INSTANCE_TYPE_CHOICES.keys()),
                      default='general_purpose'),
         
+        # Dynamic instance type choices based on category
+        inquirer.List('instance_type',
+                     message="Choose instance type",
+                     # Lambda function is used to return dynamic list of instance type choices
+                     # - it takes the answers dictionary as a parameter
+                     # - it returns the list of instance type choices for the selected category
+                     choices=lambda answers: INSTANCE_TYPE_CHOICES[answers['instance_type_category']]),
+        
         # Instance Count
         inquirer.Text('instance_count',
                      message="Enter number of instances to reserve",
-                     default='1',
+                     # Lambda function used as inline validator for inquirer
+                     # - Takes two params: _ (unused answers dict) and x (current input)
+                     # - Returns True if input is valid (digits only AND positive number)
+                     # - Used here because validation is simple and specific to this field
+                     # - Alternative would be a separate named function if more complex validation needed
                      validate=lambda _, x: x.isdigit() and int(x) > 0),
         
         # Platform Selection
         inquirer.List('platform',
-                     message="Select instance platform",
+                     message="Select platform",
                      choices=PLATFORM_CHOICES,
                      default='Linux/UNIX'),
-        
-        # Region Selection
+
+        # Region and AZ Selection
         inquirer.List('region',
-                     message="Select AWS region",
+                     message="Select region",
                      choices=REGION_CHOICES,
                      default='us-west-2'),
         
-        # Availability Zone Selection (will be populated after region selection)
         inquirer.Text('availability_zone',
-                     message="Enter availability zone (leave empty for first AZ in region)",
+                     message="Enter availability zone (leave empty for auto-select)",
                      default=''),
-        
-        # EBS Optimization
+
+        # Instance Settings
         inquirer.Confirm('ebs_optimized',
                         message="Enable EBS optimization?",
                         default=False),
         
-        # Tenancy
         inquirer.List('tenancy',
-                     message="Select instance tenancy",
+                     message="Select tenancy",
                      choices=['default', 'dedicated'],
                      default='default'),
-        
-        # End Date Configuration
+
+        # Reservation Settings
         inquirer.List('end_date_type',
-                     message="Select reservation end date type",
+                     message="Select end date type",
                      choices=['unlimited', 'limited'],
                      default='unlimited'),
-        
-        # Retry Configuration
-        inquirer.List('retry_config',
-                     message="Select retry configuration",
-                     choices=[f"{k} ({v['description']})" for k, v in RETRY_CONFIG.items()],
-                     default='QUICK_RETRY (Quick retries with short delays)'),
-        
-        # Custom Retry Options
-        inquirer.Text('custom_max_retries',
-                     message="Enter custom max retries (0 to use retry config value)",
-                     default='0',
-                     validate=lambda _, x: x.isdigit()),
-        
-        inquirer.Text('custom_retry_delay',
-                     message="Enter custom retry delay in seconds (0 to use retry config value)",
-                     default='0',
-                     validate=lambda _, x: x.isdigit()),
-        
-        inquirer.Text('max_wait_time',
-                     message="Enter maximum total wait time in seconds",
-                     default='3600',
-                     validate=lambda _, x: x.isdigit() and int(x) > 0),
-        
-        # Execution Mode
-        inquirer.Confirm('simulation_mode',
-                        message="Run in simulation mode?",
-                        default=True),
-        
-        # Log Level
-        inquirer.List('log_level',
-                     message="Select logging level",
-                     choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
-                     default='INFO'),
-        
-        # Cleanup Configuration
-        inquirer.Confirm('cleanup_on_failure',
-                        message="Clean up failed reservations?",
-                        default=True)
-    ]
-    
-    answers = inquirer.prompt(questions)
-    
-    # Handle instance type selection as second step
-    instance_category = answers.pop('instance_category')
-    instance_type_question = [
-        inquirer.List('instance_type',
-                     message="Select specific instance type",
-                     choices=INSTANCE_TYPE_CHOICES[instance_category],
-                     default=INSTANCE_TYPE_CHOICES[instance_category][0])
-    ]
-    instance_type_answer = inquirer.prompt(instance_type_question)
-    answers.update(instance_type_answer)
-    
-    # Handle end date if limited was selected
-    if answers['end_date_type'] == 'limited':
-        end_date_question = [
-            inquirer.Text('end_date',
-                         message="Enter end date (ISO 8601 format, e.g., 2024-12-31T23:59:59)",
-                         validate=lambda _, x: len(x) > 0)
-        ]
-        end_date_answer = inquirer.prompt(end_date_question)
-        # Convert end_date string to timezone-aware datetime
-        end_date = datetime.fromisoformat(end_date_answer['end_date'])
-        if end_date.tzinfo is None:
-            end_date = end_date.replace(tzinfo=tz.utc)
-        answers['end_date'] = end_date.isoformat()
-    else:
-        answers['end_date'] = None
-    
-    # Handle tags
-    tags_question = [
+
+        # End date (only if limited)
+        inquirer.Text('end_date',
+                     message="Enter end date (ISO 8601 format, e.g., 2024-12-31T23:59:59)",
+                     ignore=lambda answers: answers['end_date_type'] == 'unlimited',
+                     validate=lambda _, x: len(x) > 0),
+
+        # Tags
         inquirer.Confirm('add_tags',
                         message="Would you like to add tags?",
                         default=False)
     ]
-    tags_answer = inquirer.prompt(tags_question)
-    
-    if tags_answer['add_tags']:
+
+    answers = inquirer.prompt(questions)
+    if not answers:
+        sys.exit(1)
+
+    # Handle availability zone default if empty
+    if not answers['availability_zone']:
+        answers['availability_zone'] = f"{answers['region']}a"
+
+    # Handle tags if user wants to add them
+    if answers.pop('add_tags', False):
         tags = {}
         while True:
             tag_questions = [
                 inquirer.Text('key',
-                            message="Enter tag key",
-                            validate=lambda _, x: len(x) > 0),
+                            message="Enter tag key"),
                 inquirer.Text('value',
-                            message="Enter tag value",
-                            validate=lambda _, x: len(x) > 0),
+                            message="Enter tag value"),
                 inquirer.Confirm('add_another',
                                message="Add another tag?",
                                default=False)
             ]
             tag_answers = inquirer.prompt(tag_questions)
+            if not tag_answers:
+                break
+            
             tags[tag_answers['key']] = tag_answers['value']
             if not tag_answers['add_another']:
                 break
-        
         answers['tags'] = tags
     else:
         answers['tags'] = {}
+
+    # Display summary of choices
+    logger.info("\nCapacity Reservation Parameters Summary:")
+    logger.info("-" * 40)
+    logger.info(f"Instance Type:      {answers['instance_type']}")
+    logger.info(f"Instance Count:     {answers['instance_count']}")
+    logger.info(f"Platform:           {answers['platform']}")
+    logger.info(f"Region:            {answers['region']}")
+    logger.info(f"Availability Zone: {answers['availability_zone']}")
+    logger.info(f"EBS Optimized:     {'Yes' if answers['ebs_optimized'] else 'No'}")
+    logger.info(f"Tenancy:           {answers['tenancy']}")
+    logger.info(f"End Date Type:     {answers['end_date_type']}")
+    if answers['end_date_type'] == 'limited':
+        logger.info(f"End Date:          {answers['end_date']}")
+    if answers['tags']:
+        logger.info("\nTags:")
+        for key, value in answers['tags'].items():
+            logger.info(f"  {key}: {value}")
+    logger.info("-" * 40)
     
-    # Clean up retry config selection to match expected format
-    answers['retry_config'] = answers['retry_config'].split(' ')[0]
-    
-    # Convert numeric values
-    answers['instance_count'] = int(answers['instance_count'])
-    answers['custom_max_retries'] = int(answers['custom_max_retries'])
-    answers['custom_retry_delay'] = int(answers['custom_retry_delay'])
-    answers['max_wait_time'] = int(answers['max_wait_time'])
-    
-    # Handle empty availability zone
-    if not answers['availability_zone']:
-        answers['availability_zone'] = f"{answers['region']}a"
-    
+    # Prompt for confirmation
+    confirm = inquirer.confirm("Proceed with these parameters?", default=True)
+    if not confirm:
+        logger.info("Operation cancelled by user")
+        sys.exit(0)
+
     return answers
 
 def parse_args():
@@ -319,6 +355,24 @@ def parse_args():
     else:
         return get_interactive_choices()
 
+def get_aws_profiles():
+    """Get available AWS profiles from credentials and config files"""
+    import boto3.session
+    return boto3.session.Session().available_profiles
+
+def setup_aws_session(profile_name=None):
+    """Setup AWS session with optional profile"""
+    import boto3
+    try:
+        session = boto3.Session(profile_name=profile_name)
+        # Test the credentials
+        sts = session.client('sts')
+        sts.get_caller_identity()
+        return session
+    except Exception as e:
+        logger.error(f"Failed to setup AWS session with profile '{profile_name}': {str(e)}")
+        return None
+
 class CapacityReservationManager:
     def __init__(self, args):
         """Initialize with CLI arguments"""
@@ -326,33 +380,79 @@ class CapacityReservationManager:
         if isinstance(args, dict):
             from types import SimpleNamespace
             args_dict = args.copy()  # Make a copy to avoid modifying the original
-            # Ensure all required attributes exist
-            if 'availability_zone' not in args_dict:
-                args_dict['availability_zone'] = f"{args_dict['region']}a"
-            if 'end_date' not in args_dict:
-                args_dict['end_date'] = None
+            # Ensure all required attributes exist with defaults
+            defaults = {
+                'availability_zone': f"{args_dict.get('region', 'us-east-1')}a",
+                'end_date': None,
+                'simulation_mode': True,
+                'max_retries': 3,
+                'retry_delay': 1,
+                'max_wait_time': 3600,
+                'log_level': 'INFO',
+                'retry_config': 'QUICK_RETRY',
+                'tags': {},
+                'region': 'us-east-1'
+            }
+            # Update defaults with provided values
+            for key, value in defaults.items():
+                if key not in args_dict:
+                    args_dict[key] = value
             self.args = SimpleNamespace(**args_dict)
         else:
             self.args = args
 
-        self.ec2_client = boto3.client('ec2', region_name=self.args.region)
-        
         # Configure logging
         logging.getLogger().setLevel(getattr(logging, self.args.log_level))
-        
+
         # Set retry configuration
         self.config = RETRY_CONFIG[self.args.retry_config]
-        self.max_retries = getattr(self.args, 'custom_max_retries', 0) or self.config['max_retries']
-        self.retry_delay = getattr(self.args, 'custom_retry_delay', 0) or self.config['retry_delay_seconds']
+        self.max_retries = getattr(self.args, 'custom_max_retries', None) or self.config['max_retries']
+        self.retry_delay = getattr(self.args, 'custom_retry_delay', None) or self.config['retry_delay_seconds']
         self.max_wait_time = getattr(self.args, 'max_wait_time', 3600)
-        
-        if self.args.simulation_mode:
+
+        if not self.args.simulation_mode:
+            # Get available profiles
+            profiles = get_aws_profiles()
+            
+            if not profiles:
+                logger.warning("No AWS profiles found. Please configure AWS credentials.")
+                sys.exit(1)
+            
+            # Let user choose profile if not in simulation mode
+            profile_questions = [
+                inquirer.List('profile',
+                            message="Choose AWS Profile",
+                            choices=profiles,
+                            default=profiles[0] if profiles else None)
+            ]
+            
+            profile_answers = inquirer.prompt(profile_questions)
+            if not profile_answers:
+                logger.error("AWS profile selection cancelled")
+                sys.exit(1)
+                
+            # Setup AWS session with chosen profile
+            session = setup_aws_session(profile_answers['profile'])
+            if not session:
+                logger.error("Failed to setup AWS session")
+                sys.exit(1)
+                
+            self.ec2_client = session.client('ec2', region_name=self.args.region)
+            logger.info(f"Using AWS Profile: {profile_answers['profile']}")
+            
+            # Get and display account info
+            sts = session.client('sts')
+            account_id = sts.get_caller_identity()['Account']
+            logger.info(f"AWS Account ID: {account_id}")
+        else:
+            # In simulation mode, use stubber
+            self.ec2_client = boto3.client('ec2', region_name=self.args.region)
             self.stubber = Stubber(self.ec2_client)
             logger.info("Running in simulation mode")
             self.setup_simulation()
-        
+
         logger.info(f"Initialized with {self.config['description']}")
-        
+
     def setup_simulation(self):
         """Setup simulation responses for create_capacity_reservation"""
         from datetime import datetime
@@ -364,7 +464,7 @@ class CapacityReservationManager:
             'InstancePlatform': self.args.platform,
             'AvailabilityZone': self.args.availability_zone,
             'Tenancy': self.args.tenancy,
-            'InstanceCount': self.args.instance_count,
+            'InstanceCount': int(self.args.instance_count),  # Convert to int
             'EbsOptimized': self.args.ebs_optimized,
             'EndDateType': self.args.end_date_type,
             'TagSpecifications': [{
@@ -380,6 +480,9 @@ class CapacityReservationManager:
         # Get current UTC time
         current_time = datetime.now(pytz.UTC).isoformat()
 
+        # Convert instance count to int for response
+        instance_count = int(self.args.instance_count)
+
         # Define success response that matches AWS API format
         success_response = {
             'CapacityReservation': {
@@ -390,8 +493,8 @@ class CapacityReservationManager:
                 'InstancePlatform': self.args.platform,
                 'AvailabilityZone': self.args.availability_zone,
                 'Tenancy': self.args.tenancy,
-                'TotalInstanceCount': self.args.instance_count,
-                'AvailableInstanceCount': self.args.instance_count,
+                'TotalInstanceCount': instance_count,  # Use converted int
+                'AvailableInstanceCount': instance_count,  # Use converted int
                 'EbsOptimized': self.args.ebs_optimized,
                 'EphemeralStorage': False,
                 'State': 'active',
@@ -452,7 +555,7 @@ class CapacityReservationManager:
                     'InstancePlatform': self.args.platform,
                     'AvailabilityZone': self.args.availability_zone,
                     'Tenancy': self.args.tenancy,
-                    'InstanceCount': self.args.instance_count,
+                    'InstanceCount': int(self.args.instance_count),  # Convert to int
                     'EbsOptimized': self.args.ebs_optimized,
                     'EndDateType': self.args.end_date_type,
                     'TagSpecifications': [{
