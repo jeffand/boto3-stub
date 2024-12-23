@@ -1,6 +1,7 @@
 description: 'Create EC2 capacity reservation with configurable retry logic'
 schemaVersion: '0.3'
 parameters:
+  # Instance Configuration
   InstanceType:
     type: String
     description: EC2 instance type to reserve
@@ -9,10 +10,59 @@ parameters:
     type: Integer
     description: Number of instances to reserve
     default: 1
+  InstancePlatform:
+    type: String
+    description: Operating system platform for the instances
+    default: Linux/UNIX
+    allowedValues:
+      - Linux/UNIX
+      - Red Hat Enterprise Linux
+      - SUSE Linux
+      - Windows
+      - Windows with SQL Server
+      - Windows with SQL Server Enterprise
+      - Windows with SQL Server Standard
+      - Windows with SQL Server Web
+
+  # Location Configuration
   AvailabilityZone:
     type: String
     description: AWS Availability Zone for the reservation
     default: us-west-2a
+  Region:
+    type: String
+    description: AWS Region for the reservation
+    default: us-west-2
+
+  # Reservation Configuration
+  EbsOptimized:
+    type: Boolean
+    description: Whether instances should be EBS-optimized
+    default: false
+  Tenancy:
+    type: String
+    description: Tenancy of the reservation (default, dedicated)
+    default: default
+    allowedValues:
+      - default
+      - dedicated
+  EndDateType:
+    type: String
+    description: Whether the reservation expires or runs indefinitely
+    default: unlimited
+    allowedValues:
+      - unlimited
+      - limited
+  EndDate:
+    type: String
+    description: "(Optional) End date for limited reservations (ISO 8601 format)"
+    default: ""
+  TagSpecifications:
+    type: StringMap
+    description: "Tags to apply to the reservation (JSON format)"
+    default: {}
+
+  # Retry Configuration
   RetryConfig:
     type: String
     description: Retry configuration to use (QUICK_RETRY, SLOW_RETRY, EXTENSIVE_RETRY)
@@ -21,9 +71,36 @@ parameters:
       - QUICK_RETRY
       - SLOW_RETRY
       - EXTENSIVE_RETRY
+  CustomMaxRetries:
+    type: Integer
+    description: "(Optional) Override the max retries from RetryConfig"
+    default: 0
+  CustomRetryDelay:
+    type: Integer
+    description: "(Optional) Override the retry delay in seconds from RetryConfig"
+    default: 0
+  MaxTotalWaitTime:
+    type: Integer
+    description: Maximum total time in seconds to wait for capacity
+    default: 3600
+
+  # Execution Configuration
   SimulationMode:
     type: Boolean
     description: Run in simulation mode (true) or real mode (false)
+    default: true
+  LogLevel:
+    type: String
+    description: Logging level for the automation
+    default: INFO
+    allowedValues:
+      - DEBUG
+      - INFO
+      - WARNING
+      - ERROR
+  CleanupOnFailure:
+    type: Boolean
+    description: Whether to clean up partial reservations on failure
     default: true
 
 mainSteps:
@@ -64,11 +141,12 @@ mainSteps:
         }
 
         class CapacityReservationManager:
-            def __init__(self, region_name='us-west-2', retry_config='QUICK_RETRY', simulation_mode=True):
+            def __init__(self, region_name='us-west-2', retry_config='QUICK_RETRY', simulation_mode=True, custom_max_retries=0, custom_retry_delay=0, max_total_wait_time=3600):
                 self.ec2_client = boto3.client('ec2', region_name=region_name)
                 self.config = RETRY_CONFIG[retry_config]
-                self.max_retries = self.config['max_retries']
-                self.retry_delay = self.config['retry_delay_seconds']
+                self.max_retries = self.config['max_retries'] if custom_max_retries == 0 else custom_max_retries
+                self.retry_delay = self.config['retry_delay_seconds'] if custom_retry_delay == 0 else custom_retry_delay
+                self.max_total_wait_time = max_total_wait_time
                 self.simulation_mode = simulation_mode
                 
                 if simulation_mode:
@@ -97,8 +175,9 @@ mainSteps:
                         )
 
             def create_capacity_reservation(self, instance_type, instance_count, 
-                                         availability_zone, platform='Linux/UNIX'):
+                                         availability_zone, platform='Linux/UNIX', ebs_optimized=False, tenancy='default', end_date_type='unlimited', end_date='', tag_specifications={}):
                 attempt = 0
+                start_time = time.time()
                 
                 if self.simulation_mode:
                     self.setup_simulation()
@@ -112,7 +191,11 @@ mainSteps:
                             InstancePlatform=platform,
                             AvailabilityZone=availability_zone,
                             InstanceCount=instance_count,
-                            EndDateType='unlimited'
+                            EbsOptimized=ebs_optimized,
+                            Tenancy=tenancy,
+                            EndDateType=end_date_type,
+                            EndDate=end_date,
+                            TagSpecifications=[{'ResourceType': 'capacity-reservation', 'Tags': tag_specifications}]
                         )
                         
                         reservation_id = response['CapacityReservation']['CapacityReservationId']
@@ -140,6 +223,13 @@ mainSteps:
                                 'success': False,
                                 'error': f"AWS Error: {error_code} - {error_message}"
                             }
+                    
+                    if time.time() - start_time > self.max_total_wait_time:
+                        logger.error("Max total wait time exceeded")
+                        return {
+                            'success': False,
+                            'error': "Max total wait time exceeded"
+                        }
                 
                 return {
                     'success': False,
@@ -157,17 +247,35 @@ mainSteps:
                 availability_zone = events['AvailabilityZone']
                 retry_config = events['RetryConfig']
                 simulation_mode = events['SimulationMode']
+                custom_max_retries = events['CustomMaxRetries']
+                custom_retry_delay = events['CustomRetryDelay']
+                max_total_wait_time = events['MaxTotalWaitTime']
+                instance_platform = events['InstancePlatform']
+                ebs_optimized = events['EbsOptimized']
+                tenancy = events['Tenancy']
+                end_date_type = events['EndDateType']
+                end_date = events['EndDate']
+                tag_specifications = events['TagSpecifications']
                 
                 # Create manager and attempt reservation
                 manager = CapacityReservationManager(
                     retry_config=retry_config,
-                    simulation_mode=simulation_mode
+                    simulation_mode=simulation_mode,
+                    custom_max_retries=custom_max_retries,
+                    custom_retry_delay=custom_retry_delay,
+                    max_total_wait_time=max_total_wait_time
                 )
                 
                 result = manager.create_capacity_reservation(
                     instance_type=instance_type,
                     instance_count=instance_count,
-                    availability_zone=availability_zone
+                    availability_zone=availability_zone,
+                    platform=instance_platform,
+                    ebs_optimized=ebs_optimized,
+                    tenancy=tenancy,
+                    end_date_type=end_date_type,
+                    end_date=end_date,
+                    tag_specifications=tag_specifications
                 )
                 
                 if result['success']:
